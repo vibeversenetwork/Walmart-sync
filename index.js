@@ -9,8 +9,33 @@
 
 const cron = require("node-cron");
 const { fetchOrders, fetchInventory } = require("./src/walmart");
-const { upsertOrder, upsertInventoryItem } = require("./src/notion");
+const { upsertOrder, upsertInventoryItem, syncPickList } = require("./src/notion");
 const { sendDigest } = require("./src/digest");
+
+// Aggregate open (unshipped) order lines into per-product totals
+function buildPickList(orders) {
+  const byKey = new Map();
+  for (const o of orders) {
+    if (o.status !== "Created" && o.status !== "Acknowledged") continue;
+    for (const line of o.lineDetails || []) {
+      const key = line.name;
+      const entry = byKey.get(key) || {
+        name: line.name,
+        sku: line.sku,
+        qty: 0,
+        orderCount: 0,
+        earliestShipBy: null,
+      };
+      entry.qty += line.qty;
+      entry.orderCount += 1;
+      if (o.shipBy && (!entry.earliestShipBy || o.shipBy < entry.earliestShipBy)) {
+        entry.earliestShipBy = o.shipBy;
+      }
+      byKey.set(key, entry);
+    }
+  }
+  return Array.from(byKey.values()).sort((a, b) => b.qty - a.qty);
+}
 
 const REORDER_POINT_DEFAULT = Number(process.env.REORDER_POINT_DEFAULT || 5);
 
@@ -25,6 +50,10 @@ async function runSync() {
       await sleep(350); // Notion rate limit: ~3 req/sec
     }
     console.log("[sync] Orders: " + created + " created, " + updated + " updated");
+
+    const pickList = buildPickList(orders);
+    await syncPickList(pickList);
+    console.log("[sync] Pick list: " + pickList.length + " products needed");
 
     const inventory = await fetchInventory();
     let invCreated = 0, invUpdated = 0;
