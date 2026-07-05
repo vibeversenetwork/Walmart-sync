@@ -105,6 +105,49 @@ async function upsertInventoryItem(item, reorderPointDefault) {
   return "created";
 }
 
+// Rebuild the Daily Pick List: upsert needed items, zero out anything no longer needed
+async function syncPickList(pickItems) {
+  const dbId = process.env.NOTION_PICKLIST_DB;
+  if (!dbId) return;
+
+  const existing = await queryAll(dbId);
+  const existingByKey = new Map();
+  for (const page of existing) {
+    const key = page.properties["Product"]?.title?.map((t) => t.plain_text).join("") || "";
+    existingByKey.set(key, page);
+  }
+
+  const neededKeys = new Set();
+  for (const item of pickItems) {
+    neededKeys.add(item.name);
+    const props = {
+      "Product": { title: [{ text: { content: item.name } }] },
+      "SKU": textProp(item.sku),
+      "Qty Needed": { number: item.qty },
+      "Open Orders": { number: item.orderCount },
+      "Earliest Ship By": dateOrNull(item.earliestShipBy),
+    };
+    const page = existingByKey.get(item.name);
+    if (page) {
+      await notionFetch("/pages/" + page.id, "PATCH", { properties: props });
+    } else {
+      await notionFetch("/pages", "POST", { parent: { database_id: dbId }, properties: props });
+    }
+    await new Promise((r) => setTimeout(r, 350));
+  }
+
+  // Zero out items no longer needed (keeps history, hidden by the Pick Today view)
+  for (const [key, page] of existingByKey) {
+    if (neededKeys.has(key)) continue;
+    const currentQty = page.properties["Qty Needed"]?.number;
+    if (currentQty === 0) continue;
+    await notionFetch("/pages/" + page.id, "PATCH", {
+      properties: { "Qty Needed": { number: 0 }, "Open Orders": { number: 0 } },
+    });
+    await new Promise((r) => setTimeout(r, 350));
+  }
+}
+
 // Pull current state back out of Notion for the daily digest
 async function queryAll(databaseId) {
   const results = [];
@@ -120,4 +163,4 @@ async function queryAll(databaseId) {
   return results;
 }
 
-module.exports = { upsertOrder, upsertInventoryItem, queryAll };
+module.exports = { upsertOrder, upsertInventoryItem, queryAll, syncPickList };

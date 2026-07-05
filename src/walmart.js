@@ -110,6 +110,13 @@ function normalizeOrder(o) {
     if (trackingNumber) break;
   }
 
+  // Line-level detail for pick list aggregation
+  const lineDetails = lines.map((l) => ({
+    sku: l.item?.sku || "",
+    name: l.item?.productName || "Unknown",
+    qty: Number(l.orderLineQuantity?.amount || 1),
+  }));
+
   return {
     orderNumber: o.purchaseOrderId,
     orderDate: o.orderDate ? new Date(o.orderDate).toISOString().slice(0, 10) : null,
@@ -125,6 +132,7 @@ function normalizeOrder(o) {
     trackingNumber,
     carrier: normalizeCarrier(carrier),
     trackingUrl,
+    lineDetails,
   };
 }
 

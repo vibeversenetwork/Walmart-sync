@@ -60,7 +60,23 @@ async function buildDigest() {
       status: getProp(p, "Stock Status"),
     }));
 
-  return { today, needsShipment, shippingLate, newToday, shippedYesterday, lowStock };
+  // Pick list: what to pull today to fulfill all open orders
+  let pickList = [];
+  if (process.env.NOTION_PICKLIST_DB) {
+    const pickPages = await queryAll(process.env.NOTION_PICKLIST_DB);
+    pickList = pickPages
+      .map((p) => ({
+        product: getProp(p, "Product"),
+        sku: getProp(p, "SKU"),
+        qty: getProp(p, "Qty Needed"),
+        orders: getProp(p, "Open Orders"),
+        shipBy: getProp(p, "Earliest Ship By"),
+      }))
+      .filter((p) => (p.qty || 0) > 0)
+      .sort((a, b) => (b.qty || 0) - (a.qty || 0));
+  }
+
+  return { today, needsShipment, shippingLate, newToday, shippedYesterday, lowStock, pickList };
 }
 
 function renderHtml(d) {
@@ -94,9 +110,25 @@ function renderHtml(d) {
           .join("") +
         "</table>";
 
+  const pickRows =
+    d.pickList.length === 0
+      ? "<p style='color:#888'>Nothing to pick - all orders shipped</p>"
+      : "<table border='0' cellpadding='6' style='border-collapse:collapse;font-size:14px'>" +
+        "<tr style='background:#f4f4f4'><th align='left'>Product</th><th align='left'>Qty Needed</th><th align='left'>Orders</th><th align='left'>Earliest Ship By</th></tr>" +
+        d.pickList
+          .map(
+            (p) =>
+              "<tr style='border-bottom:1px solid #eee'><td>" + (p.product || "") +
+              "</td><td style='font-size:16px'><b>" + (p.qty ?? "-") + "</b></td><td>" +
+              (p.orders ?? "-") + "</td><td>" + (p.shipBy || "-") + "</td></tr>"
+          )
+          .join("") +
+        "</table>";
+
   return (
     "<div style='font-family:Arial,sans-serif;max-width:640px'>" +
     "<h2>Sa'Venttii Walmart Daily Digest - " + d.today + "</h2>" +
+    "<h3>Today's Pick List - " + d.pickList.length + " products</h3>" + pickRows +
     (d.shippingLate.length > 0
       ? "<h3 style='color:#c0392b'>LATE - Ship immediately (" + d.shippingLate.length + ")</h3>" + orderRows(d.shippingLate)
       : "") +
