@@ -31,6 +31,22 @@ async function findByTitle(databaseId, titleProp, value) {
   return data.results[0] || null;
 }
 
+function pageTitle(page, titleProp) {
+  return page.properties[titleProp]?.title?.map((t) => t.plain_text).join("") || "";
+}
+function pageText(page, prop) {
+  return page.properties[prop]?.rich_text?.map((t) => t.plain_text).join("") || "";
+}
+
+// Load ALL rows of a database once and index them by title — one query per 100 rows
+// instead of one query per order. Critical for high order volume.
+async function buildIndex(databaseId, titleProp) {
+  const pages = await queryAll(databaseId);
+  const map = new Map();
+  for (const p of pages) map.set(pageTitle(p, titleProp), p);
+  return map;
+}
+
 function selectOrNull(v) {
   return v ? { select: { name: v } } : { select: null };
 }
@@ -41,8 +57,18 @@ function dateOrNull(v) {
   return v ? { date: { start: v } } : { date: null };
 }
 
-async function upsertOrder(o) {
+async function upsertOrder(o, index) {
   const dbId = process.env.NOTION_ORDERS_DB;
+  const existing = index ? index.get(o.orderNumber) : await findByTitle(dbId, "Order #", o.orderNumber);
+
+  // Skip entirely if nothing meaningful changed — saves 2 API calls + sleep per order
+  if (existing) {
+    const sameStatus = (existing.properties["Status"]?.select?.name || "") === (o.status || "");
+    const sameTracking = pageText(existing, "Tracking #") === (o.trackingNumber || "");
+    const sameShipBy = (existing.properties["Ship By"]?.date?.start || null) === (o.shipBy || null);
+    if (sameStatus && sameTracking && sameShipBy) return "skipped";
+  }
+
   const props = {
     "Order #": { title: [{ text: { content: o.orderNumber } }] },
     "Order Date": dateOrNull(o.orderDate),
@@ -56,7 +82,6 @@ async function upsertOrder(o) {
     "Tracking URL": { url: o.trackingUrl || null },
   };
 
-  const existing = await findByTitle(dbId, "Order #", o.orderNumber);
   if (existing) {
     await notionFetch("/pages/" + existing.id, "PATCH", { properties: props });
     return "updated";
@@ -68,9 +93,9 @@ async function upsertOrder(o) {
   return "created";
 }
 
-async function upsertInventoryItem(item, reorderPointDefault) {
+async function upsertInventoryItem(item, reorderPointDefault, index) {
   const dbId = process.env.NOTION_INVENTORY_DB;
-  const existing = await findByTitle(dbId, "SKU", item.sku);
+  const existing = index ? index.get(item.sku) : await findByTitle(dbId, "SKU", item.sku);
 
   // Preserve a manually-set Reorder Point if the row already exists
   let reorderPoint = reorderPointDefault;
@@ -82,6 +107,15 @@ async function upsertInventoryItem(item, reorderPointDefault) {
   let stockStatus = "In Stock";
   if (item.qtyAvailable === 0) stockStatus = "Out of Stock";
   else if (item.qtyAvailable !== null && item.qtyAvailable <= reorderPoint) stockStatus = "Low Stock";
+
+  // Skip if nothing changed
+  if (existing) {
+    const sameQty = (existing.properties["Qty Available"]?.number ?? null) === (item.qtyAvailable ?? null);
+    const samePrice = (existing.properties["Price"]?.number ?? null) === (item.price ?? null);
+    const sameStatus = (existing.properties["Stock Status"]?.select?.name || "") === stockStatus;
+    const samePublish = (existing.properties["Publish Status"]?.select?.name || "") === item.publishStatus;
+    if (sameQty && samePrice && sameStatus && samePublish) return "skipped";
+  }
 
   const props = {
     "SKU": { title: [{ text: { content: item.sku } }] },
@@ -163,4 +197,4 @@ async function queryAll(databaseId) {
   return results;
 }
 
-module.exports = { upsertOrder, upsertInventoryItem, queryAll, syncPickList };
+module.exports = { upsertOrder, upsertInventoryItem, queryAll, syncPickList, buildIndex };
