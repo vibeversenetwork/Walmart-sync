@@ -1,0 +1,9 @@
+WALMART_CLIENT_ID = (from Seller Center → Developer Portal)
+WALMART_CLIENT_SECRET = (same place)
+NOTION_TOKEN = (the ntn_ token you just created)
+NOTION_ORDERS_DB = a794e5214fa249029099bcb910cf2bd5
+NOTION_INVENTORY_DB = c116689d42fb481f9fd14316785e61f3
+BREVO_API_KEY = (Brevo → Settings → SMTP & API → API Keys)
+DIGEST_FROM_EMAIL = (a sender verified in Brevo)
+DIGEST_TO_EMAIL = (where you want the 7 AM digest)
+REORDER_POINT_DEFAULT = 5
