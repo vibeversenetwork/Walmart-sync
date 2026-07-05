@@ -9,7 +9,7 @@
 
 const cron = require("node-cron");
 const { fetchOrders, fetchInventory } = require("./src/walmart");
-const { upsertOrder, upsertInventoryItem, syncPickList } = require("./src/notion");
+const { upsertOrder, upsertInventoryItem, syncPickList, buildIndex } = require("./src/notion");
 const { sendDigest } = require("./src/digest");
 
 // Aggregate open (unshipped) order lines into per-product totals
@@ -38,33 +38,57 @@ function buildPickList(orders) {
 }
 
 const REORDER_POINT_DEFAULT = Number(process.env.REORDER_POINT_DEFAULT || 5);
+let syncRunning = false;
 
 async function runSync() {
+  if (syncRunning) {
+    console.log("[sync] Previous sync still running - skipping this cycle");
+    return;
+  }
+  syncRunning = true;
   console.log("[sync] Starting at " + new Date().toISOString());
   try {
+    // ---- Orders ----
     const orders = await fetchOrders(14);
-    let created = 0, updated = 0;
-    for (const o of orders) {
-      const result = await upsertOrder(o);
-      if (result === "created") created++; else updated++;
-      await sleep(350); // Notion rate limit: ~3 req/sec
-    }
-    console.log("[sync] Orders: " + created + " created, " + updated + " updated");
+    console.log("[sync] Walmart returned " + orders.length + " orders, loading Notion index...");
+    const orderIndex = await buildIndex(process.env.NOTION_ORDERS_DB, "Order #");
 
+    let created = 0, updated = 0, skipped = 0, done = 0;
+    for (const o of orders) {
+      const result = await upsertOrder(o, orderIndex);
+      if (result === "created") created++;
+      else if (result === "updated") updated++;
+      else skipped++;
+      if (result !== "skipped") await sleep(350); // only throttle actual API writes
+      done++;
+      if (done % 50 === 0) console.log("[sync] Orders progress: " + done + "/" + orders.length);
+    }
+    console.log("[sync] Orders: " + created + " created, " + updated + " updated, " + skipped + " unchanged");
+
+    // ---- Pick list ----
     const pickList = buildPickList(orders);
     await syncPickList(pickList);
     console.log("[sync] Pick list: " + pickList.length + " products needed");
 
+    // ---- Inventory ----
     const inventory = await fetchInventory();
-    let invCreated = 0, invUpdated = 0;
+    console.log("[sync] Walmart returned " + inventory.length + " items, loading Notion index...");
+    const invIndex = await buildIndex(process.env.NOTION_INVENTORY_DB, "SKU");
+
+    let invCreated = 0, invUpdated = 0, invSkipped = 0;
     for (const item of inventory) {
-      const result = await upsertInventoryItem(item, REORDER_POINT_DEFAULT);
-      if (result === "created") invCreated++; else invUpdated++;
-      await sleep(350);
+      const result = await upsertInventoryItem(item, REORDER_POINT_DEFAULT, invIndex);
+      if (result === "created") invCreated++;
+      else if (result === "updated") invUpdated++;
+      else invSkipped++;
+      if (result !== "skipped") await sleep(350);
     }
-    console.log("[sync] Inventory: " + invCreated + " created, " + invUpdated + " updated");
+    console.log("[sync] Inventory: " + invCreated + " created, " + invUpdated + " updated, " + invSkipped + " unchanged");
+    console.log("[sync] Complete at " + new Date().toISOString());
   } catch (e) {
     console.error("[sync] FAILED: " + e.message);
+  } finally {
+    syncRunning = false;
   }
 }
 
