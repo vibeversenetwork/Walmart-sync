@@ -117,14 +117,24 @@ function normalizeOrder(o) {
     qty: Number(l.orderLineQuantity?.amount || 1),
   }));
 
+  // Ship-by: order-level estimate, falling back to earliest line-level ship date
+  let shipBy = o.shippingInfo?.estimatedShipDate
+    ? new Date(o.shippingInfo.estimatedShipDate).toISOString().slice(0, 10)
+    : null;
+  if (!shipBy) {
+    for (const l of lines) {
+      const d = l.fulfillment?.pickUpDateTime || l.statusDate;
+      if (d) {
+        const iso = new Date(d).toISOString().slice(0, 10);
+        if (!shipBy || iso < shipBy) shipBy = iso;
+      }
+    }
+  }
+
   return {
     orderNumber: o.purchaseOrderId,
     orderDate: o.orderDate ? new Date(o.orderDate).toISOString().slice(0, 10) : null,
-    shipBy: lines[0]?.statusDate
-      ? null
-      : o.shippingInfo?.estimatedShipDate
-      ? new Date(o.shippingInfo.estimatedShipDate).toISOString().slice(0, 10)
-      : null,
+    shipBy,
     status,
     items,
     qty,
