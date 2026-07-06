@@ -101,6 +101,9 @@ async function buildDigest() {
       status: getProp(p, "Stock Status"),
     }));
 
+  // OTD guardrail: unshipped orders due today or overdue
+  const dueToday = needsShipment.filter((o) => o.shipBy && o.shipBy <= today);
+
   // Pick list: what to pull today to fulfill all open orders
   let pickList = [];
   if (process.env.NOTION_PICKLIST_DB) {
@@ -117,7 +120,7 @@ async function buildDigest() {
       .sort((a, b) => (b.qty || 0) - (a.qty || 0));
   }
 
-  return { today, needsShipment, shippingLate, newToday, shippedYesterday, lowStock, pickList };
+  return { today, needsShipment, shippingLate, newToday, shippedYesterday, lowStock, pickList, dueToday };
 }
 
 function renderHtml(d) {
@@ -215,4 +218,54 @@ async function sendDigest() {
   console.log("[digest] Sent for " + digest.today);
 }
 
-module.exports = { sendDigest };
+// OTD guardrail: afternoon tripwire. Sends ONLY if unshipped orders are due today or overdue.
+// Suspension in June 2026 was caused by OTD dropping below 90% - this alert exists so that never repeats.
+async function sendOTDAlert() {
+  const d = await buildDigest();
+  if (d.dueToday.length === 0) {
+    console.log("[otd] All clear - no unshipped orders due today");
+    return;
+  }
+
+  const rows = d.dueToday
+    .map(
+      (o) =>
+        "<tr style='border-bottom:1px solid #eee'><td><b>" + (o.orderNum || "") + "</b></td><td>" +
+        (o.items || "") + "</td><td style='color:#c0392b'><b>" + (o.shipBy || "") + "</b></td></tr>"
+    )
+    .join("");
+
+  const html =
+    "<div style='font-family:Arial,sans-serif;max-width:640px'>" +
+    "<h2 style='color:#c0392b'>\u26a0\ufe0f OTD ALERT: " + d.dueToday.length + " order(s) must ship TODAY</h2>" +
+    "<p>These are unshipped and at/past their ship-by date. Every one of these that ships late pushes OTD toward the 90% suspension line.</p>" +
+    "<table border='0' cellpadding='6' style='border-collapse:collapse;font-size:14px'>" +
+    "<tr style='background:#f4f4f4'><th align='left'>Order</th><th align='left'>Items</th><th align='left'>Ship By</th></tr>" +
+    rows +
+    "</table>" +
+    "<p style='margin-top:16px'><b>Ship these before carrier cutoff.</b></p>" +
+    "</div>";
+
+  const res = await fetch("https://api.brevo.com/v3/smtp/email", {
+    method: "POST",
+    headers: {
+      "api-key": process.env.BREVO_API_KEY,
+      "Content-Type": "application/json",
+      "Accept": "application/json",
+    },
+    body: JSON.stringify({
+      sender: { name: "Sa'Venttii Ops", email: process.env.DIGEST_FROM_EMAIL },
+      to: [{ email: process.env.DIGEST_TO_EMAIL }],
+      subject: "\ud83d\udea8 SHIP TODAY: " + d.dueToday.length + " order(s) at risk - protect OTD",
+      htmlContent: html,
+    }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error("Brevo OTD alert failed (" + res.status + "): " + text);
+  }
+  console.log("[otd] Alert sent - " + d.dueToday.length + " at-risk orders");
+}
+
+module.exports = { sendDigest, sendOTDAlert };
