@@ -10,7 +10,7 @@
 const cron = require("node-cron");
 const { fetchOrders, fetchInventory } = require("./src/walmart");
 const { upsertOrder, upsertInventoryItem, syncPickList, buildIndex } = require("./src/notion");
-const { sendDigest } = require("./src/digest");
+const { sendDigest, sendOTDAlert } = require("./src/digest");
 
 // Aggregate open (unshipped) order lines into per-product totals
 function buildPickList(orders) {
@@ -107,9 +107,13 @@ async function main() {
     await sendDigest();
     process.exit(0);
   }
+  if (args.includes("--otd")) {
+    await sendOTDAlert();
+    process.exit(0);
+  }
 
   // Long-running mode for Railway
-  console.log("Sa'Venttii Walmart Sync running. Sync every 30 min, digest daily 7 AM ET.");
+  console.log("Sa'Venttii Walmart Sync running. Sync every 30 min, digest daily 7 AM ET, OTD tripwire 3 PM ET.");
 
   // Sync every 30 minutes
   cron.schedule("*/30 * * * *", runSync);
@@ -117,6 +121,11 @@ async function main() {
   // Digest at 7:00 AM Eastern
   cron.schedule("0 7 * * *", () => {
     sendDigest().catch((e) => console.error("[digest] FAILED: " + e.message));
+  }, { timezone: "America/New_York" });
+
+  // OTD tripwire at 3:00 PM Eastern - only emails if unshipped orders are due today/overdue
+  cron.schedule("0 15 * * *", () => {
+    sendOTDAlert().catch((e) => console.error("[otd] FAILED: " + e.message));
   }, { timezone: "America/New_York" });
 
   // Run one sync immediately on boot
