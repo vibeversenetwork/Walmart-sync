@@ -1,6 +1,47 @@
 // Daily digest email via Brevo (transactional email API)
 const { queryAll } = require("./notion");
 
+// Rotates daily - mix of scripture (KJV), affirmations, and builder energy
+const DAILY_ENCOURAGEMENT = [
+  "\"She is clothed with strength and dignity; she can laugh at the days to come.\" - Proverbs 31:25",
+  "\"And let us not be weary in well doing: for in due season we shall reap, if we faint not.\" - Galatians 6:9",
+  "\"Commit thy works unto the LORD, and thy thoughts shall be established.\" - Proverbs 16:3",
+  "You are building something your future self will thank you for.",
+  "\"The soul of the diligent shall be made fat.\" - Proverbs 13:4",
+  "Systems over stress. You already proved you can do hard things.",
+  "\"I can do all things through Christ which strengtheneth me.\" - Philippians 4:13",
+  "Every order shipped is a brick in the empire. Lay today's bricks.",
+  "\"For I know the thoughts that I think toward you, saith the LORD, thoughts of peace, and not of evil, to give you an expected end.\" - Jeremiah 29:11",
+  "Profit is a byproduct of discipline. You have both.",
+  "\"Seest thou a man diligent in his business? he shall stand before kings.\" - Proverbs 22:29",
+  "Small consistent days build unrecognizable years.",
+  "\"Trust in the LORD with all thine heart; and lean not unto thine own understanding.\" - Proverbs 3:5",
+  "You didn't come this far to only come this far.",
+  "\"Delight thyself also in the LORD; and he shall give thee the desires of thine heart.\" - Psalm 37:4",
+  "CEO move of the day: work the system, don't let the day work you.",
+  "\"Be strong and of a good courage; be not afraid... for the LORD thy God is with thee whithersoever thou goest.\" - Joshua 1:9",
+  "Your only competition is yesterday's version of this business.",
+  "\"The blessing of the LORD, it maketh rich, and he addeth no sorrow with it.\" - Proverbs 10:22",
+  "Pack with purpose. Price with confidence. Rest without guilt.",
+  "\"But they that wait upon the LORD shall renew their strength; they shall mount up with wings as eagles.\" - Isaiah 40:31",
+  "A calm operator outperforms a busy one. Breathe, then execute.",
+  "\"In all thy ways acknowledge him, and he shall direct thy paths.\" - Proverbs 3:6",
+  "The margin is in the details. You see details other sellers skip.",
+  "\"This is the day which the LORD hath made; we will rejoice and be glad in it.\" - Psalm 118:24",
+  "Money loves order. Today, your business has both.",
+  "\"Casting all your care upon him; for he careth for you.\" - 1 Peter 5:7",
+  "Grow the winners. Cut the noise. Protect the cash.",
+  "\"The LORD shall fight for you, and ye shall hold your peace.\" - Exodus 14:14",
+  "One day this season will be the story you tell. Make it a good chapter.",
+];
+
+function getDailyEncouragement() {
+  const now = new Date();
+  const start = new Date(now.getFullYear(), 0, 0);
+  const dayOfYear = Math.floor((now - start) / 86400000);
+  return DAILY_ENCOURAGEMENT[dayOfYear % DAILY_ENCOURAGEMENT.length];
+}
+
 function getProp(page, name) {
   const p = page.properties[name];
   if (!p) return null;
@@ -128,6 +169,9 @@ function renderHtml(d) {
   return (
     "<div style='font-family:Arial,sans-serif;max-width:640px'>" +
     "<h2>Sa'Venttii Walmart Daily Digest - " + d.today + "</h2>" +
+    "<div style='background:#faf6ef;border-left:4px solid #2d5a3d;padding:14px 18px;margin:12px 0 20px 0;font-style:italic;color:#3d3d3d;font-size:15px;line-height:1.5'>" +
+    getDailyEncouragement() +
+    "</div>" +
     "<h3>Today's Pick List - " + d.pickList.length + " products</h3>" + pickRows +
     (d.shippingLate.length > 0
       ? "<h3 style='color:#c0392b'>LATE - Ship immediately (" + d.shippingLate.length + ")</h3>" + orderRows(d.shippingLate)
