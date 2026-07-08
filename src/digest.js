@@ -268,4 +268,69 @@ async function sendOTDAlert() {
   console.log("[otd] Alert sent - " + d.dueToday.length + " at-risk orders");
 }
 
-module.exports = { sendDigest, sendOTDAlert };
+// End-of-day close-out: 8 PM ET. Day-specific status + the close-out checklist.
+async function sendEOD() {
+  const d = await buildDigest();
+  const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+  const dueTomorrow = d.needsShipment.filter((o) => o.shipBy === tomorrow);
+
+  const blocker =
+    d.dueToday.length > 0
+      ? "<div style='background:#fdecea;border-left:4px solid #c0392b;padding:12px 16px;margin:12px 0'><b style='color:#c0392b'>\u26d4 DO NOT CLOSE THE DAY: " +
+        d.dueToday.length +
+        " order(s) due today are still unshipped.</b> Ship or acknowledge these first: " +
+        d.dueToday.map((o) => o.orderNum).join(", ") +
+        "</div>"
+      : "<div style='background:#eef7f0;border-left:4px solid #2d5a3d;padding:12px 16px;margin:12px 0'><b style='color:#2d5a3d'>\u2705 Shipping clear.</b> Nothing due today is unshipped.</div>";
+
+  const pickPreview =
+    d.pickList.length === 0
+      ? "<p style='color:#888'>Nothing queued for tomorrow yet.</p>"
+      : "<ul>" +
+        d.pickList.slice(0, 8).map((p) => "<li><b>" + p.qty + "\u00d7</b> " + p.product + "</li>").join("") +
+        (d.pickList.length > 8 ? "<li>\u2026and " + (d.pickList.length - 8) + " more products</li>" : "") +
+        "</ul>";
+
+  const html =
+    "<div style='font-family:Arial,sans-serif;max-width:640px'>" +
+    "<h2>\ud83c\udf19 EOD Close-Out - " + d.today + "</h2>" +
+    blocker +
+    "<h3>Tomorrow's pull preview (" + d.pickList.length + " products, " + dueTomorrow.length + " orders due tomorrow)</h3>" +
+    pickPreview +
+    "<h3>Restock alerts: " + d.lowStock.length + "</h3>" +
+    (d.lowStock.length > 0
+      ? "<p>" + d.lowStock.slice(0, 6).map((s) => s.sku + " (" + (s.qty ?? "?") + ")").join(" \u00b7 ") + "</p>"
+      : "<p style='color:#888'>All stocked.</p>") +
+    "<h3>Close-out checklist</h3>" +
+    "<ol>" +
+    "<li>Shipping clear? (see banner above)</li>" +
+    "<li>Tier 1 anchor on the restock list? \u2192 place the order tonight, not tomorrow</li>" +
+    "<li>New orders after carrier cutoff? They're tomorrow's first pulls \u2014 already in the pick list</li>" +
+    "<li>One line in the log: today's win / today's problem</li>" +
+    "<li>Close Seller Center. The 7 AM digest opens tomorrow.</li>" +
+    "</ol>" +
+    "</div>";
+
+  const res = await fetch("https://api.brevo.com/v3/smtp/email", {
+    method: "POST",
+    headers: {
+      "api-key": process.env.BREVO_API_KEY,
+      "Content-Type": "application/json",
+      "Accept": "application/json",
+    },
+    body: JSON.stringify({
+      sender: { name: "Sa'Venttii Ops", email: process.env.DIGEST_FROM_EMAIL },
+      to: [{ email: process.env.DIGEST_TO_EMAIL }],
+      subject:
+        (d.dueToday.length > 0 ? "\u26d4 " : "\ud83c\udf19 ") +
+        "EOD Close-Out: " +
+        (d.dueToday.length > 0 ? d.dueToday.length + " MUST SHIP, " : "shipping clear, ") +
+        d.pickList.length + " products queued for tomorrow",
+      htmlContent: html,
+    }),
+  });
+  if (!res.ok) throw new Error("Brevo EOD failed (" + res.status + "): " + await res.text());
+  console.log("[eod] Close-out sent for " + d.today);
+}
+
+module.exports = { sendDigest, sendOTDAlert, sendEOD };
