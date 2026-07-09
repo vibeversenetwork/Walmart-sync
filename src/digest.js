@@ -1,6 +1,11 @@
 // Daily digest email via Brevo (transactional email API)
 const { queryAll } = require("./notion");
 
+// Eastern-time dates (UTC was drifting evening dates a day ahead)
+function etDate(offsetDays = 0) {
+  return new Date(Date.now() + offsetDays * 86400000).toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+}
+
 // Rotates daily - mix of scripture (KJV), affirmations, and builder energy
 const DAILY_ENCOURAGEMENT = [
   "\"She is clothed with strength and dignity; she can laugh at the days to come.\" - Proverbs 31:25",
@@ -57,7 +62,7 @@ function getProp(page, name) {
 }
 
 async function buildDigest() {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = etDate(0);
   const orders = await queryAll(process.env.NOTION_ORDERS_DB);
   const inventory = await queryAll(process.env.NOTION_INVENTORY_DB);
 
@@ -66,7 +71,7 @@ async function buildDigest() {
   const newToday = [];
   const shippedYesterday = [];
 
-  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  const yesterday = etDate(-1);
 
   for (const page of orders) {
     const status = getProp(page, "Status");
@@ -113,6 +118,8 @@ async function buildDigest() {
         product: getProp(p, "Product"),
         sku: getProp(p, "SKU"),
         qty: getProp(p, "Qty Needed"),
+        qtyToday: getProp(p, "Qty Due Today"),
+        qtyTomorrow: getProp(p, "Qty Due Tomorrow"),
         orders: getProp(p, "Open Orders"),
         shipBy: getProp(p, "Earliest Ship By"),
       }))
@@ -154,17 +161,18 @@ function renderHtml(d) {
           .join("") +
         "</table>";
 
+  const pickToday = d.pickList.filter((p) => (p.qtyToday || 0) > 0);
   const pickRows =
-    d.pickList.length === 0
+    pickToday.length === 0
       ? "<p style='color:#888'>Nothing to pick - all orders shipped</p>"
       : "<table border='0' cellpadding='6' style='border-collapse:collapse;font-size:14px'>" +
-        "<tr style='background:#f4f4f4'><th align='left'>Product</th><th align='left'>Qty Needed</th><th align='left'>Orders</th><th align='left'>Earliest Ship By</th></tr>" +
-        d.pickList
+        "<tr style='background:#f4f4f4'><th align='left'>Product</th><th align='left'>Due Today</th><th align='left'>Also Open</th><th align='left'>Earliest Ship By</th></tr>" +
+        pickToday
           .map(
             (p) =>
               "<tr style='border-bottom:1px solid #eee'><td>" + (p.product || "") +
-              "</td><td style='font-size:16px'><b>" + (p.qty ?? "-") + "</b></td><td>" +
-              (p.orders ?? "-") + "</td><td>" + (p.shipBy || "-") + "</td></tr>"
+              "</td><td style='font-size:16px'><b>" + (p.qtyToday ?? "-") + "</b></td><td>" +
+              ((p.qty ?? 0) - (p.qtyToday ?? 0)) + "</td><td>" + (p.shipBy || "-") + "</td></tr>"
           )
           .join("") +
         "</table>";
@@ -175,7 +183,7 @@ function renderHtml(d) {
     "<div style='background:#faf6ef;border-left:4px solid #2d5a3d;padding:14px 18px;margin:12px 0 20px 0;font-style:italic;color:#3d3d3d;font-size:15px;line-height:1.5'>" +
     getDailyEncouragement() +
     "</div>" +
-    "<h3>Today's Pick List - " + d.pickList.length + " products</h3>" + pickRows +
+    "<h3>Today's Pick List (due today) - " + d.pickList.filter((p)=> (p.qtyToday||0)>0).length + " products</h3>" + pickRows +
     (d.shippingLate.length > 0
       ? "<h3 style='color:#c0392b'>LATE - Ship immediately (" + d.shippingLate.length + ")</h3>" + orderRows(d.shippingLate)
       : "") +
@@ -204,7 +212,7 @@ async function sendDigest() {
       to: [{ email: process.env.DIGEST_TO_EMAIL }],
       subject:
         "Walmart Daily: " +
-        digest.needsShipment.length + " to ship" +
+        digest.pickList.filter((p)=> (p.qtyToday||0)>0).length + " products to pick today" +
         (digest.shippingLate.length > 0 ? " (" + digest.shippingLate.length + " LATE)" : "") +
         ", " + digest.lowStock.length + " restock alerts",
       htmlContent: html,
@@ -271,7 +279,7 @@ async function sendOTDAlert() {
 // End-of-day close-out: 8 PM ET. Day-specific status + the close-out checklist.
 async function sendEOD() {
   const d = await buildDigest();
-  const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+  const tomorrow = etDate(1);
   const dueTomorrow = d.needsShipment.filter((o) => o.shipBy === tomorrow);
 
   const blocker =
@@ -283,19 +291,20 @@ async function sendEOD() {
         "</div>"
       : "<div style='background:#eef7f0;border-left:4px solid #2d5a3d;padding:12px 16px;margin:12px 0'><b style='color:#2d5a3d'>\u2705 Shipping clear.</b> Nothing due today is unshipped.</div>";
 
+  const pickTomorrow = d.pickList.filter((p) => (p.qtyTomorrow || 0) > 0);
   const pickPreview =
-    d.pickList.length === 0
+    pickTomorrow.length === 0
       ? "<p style='color:#888'>Nothing queued for tomorrow yet.</p>"
       : "<ul>" +
-        d.pickList.slice(0, 8).map((p) => "<li><b>" + p.qty + "\u00d7</b> " + p.product + "</li>").join("") +
-        (d.pickList.length > 8 ? "<li>\u2026and " + (d.pickList.length - 8) + " more products</li>" : "") +
+        pickTomorrow.slice(0, 8).map((p) => "<li><b>" + p.qtyTomorrow + "\u00d7</b> " + p.product + "</li>").join("") +
+        (pickTomorrow.length > 8 ? "<li>\u2026and " + (pickTomorrow.length - 8) + " more products</li>" : "") +
         "</ul>";
 
   const html =
     "<div style='font-family:Arial,sans-serif;max-width:640px'>" +
     "<h2>\ud83c\udf19 EOD Close-Out - " + d.today + "</h2>" +
     blocker +
-    "<h3>Tomorrow's pull preview (" + d.pickList.length + " products, " + dueTomorrow.length + " orders due tomorrow)</h3>" +
+    "<h3>Tomorrow's pull preview (" + pickTomorrow.length + " products, " + dueTomorrow.length + " orders due tomorrow)</h3>" +
     pickPreview +
     "<h3>Restock alerts: " + d.lowStock.length + "</h3>" +
     (d.lowStock.length > 0
@@ -325,7 +334,7 @@ async function sendEOD() {
         (d.dueToday.length > 0 ? "\u26d4 " : "\ud83c\udf19 ") +
         "EOD Close-Out: " +
         (d.dueToday.length > 0 ? d.dueToday.length + " MUST SHIP, " : "shipping clear, ") +
-        d.pickList.length + " products queued for tomorrow",
+        pickTomorrow.length + " products queued for tomorrow",
       htmlContent: html,
     }),
   });
@@ -333,4 +342,31 @@ async function sendEOD() {
   console.log("[eod] Close-out sent for " + d.today);
 }
 
-module.exports = { sendDigest, sendOTDAlert, sendEOD };
+// System alert: emails when the sync itself is failing. The system watches itself.
+async function sendSystemAlert(message) {
+  const res = await fetch("https://api.brevo.com/v3/smtp/email", {
+    method: "POST",
+    headers: {
+      "api-key": process.env.BREVO_API_KEY,
+      "Content-Type": "application/json",
+      "Accept": "application/json",
+    },
+    body: JSON.stringify({
+      sender: { name: "Sa'Venttii Ops", email: process.env.DIGEST_FROM_EMAIL },
+      to: [{ email: process.env.DIGEST_TO_EMAIL }],
+      subject: "\u26a0\ufe0f SYSTEM ALERT: Walmart sync is failing",
+      htmlContent:
+        "<div style='font-family:Arial,sans-serif;max-width:640px'>" +
+        "<h2 style='color:#c0392b'>\u26a0\ufe0f The sync system needs attention</h2>" +
+        "<p>" + message + "</p>" +
+        "<p>Notion data is NOT updating until this is fixed. Check Railway deploy logs: " +
+        "<a href='https://railway.com/project/66e410a1-b8df-4f43-b91f-27cb5af12c42'>open Railway</a></p>" +
+        "<p>Until fixed, work orders directly from Seller Center \u2014 do not trust the dashboard.</p>" +
+        "</div>",
+    }),
+  });
+  if (!res.ok) throw new Error("System alert send failed: " + res.status);
+  console.log("[alert] System alert sent");
+}
+
+module.exports = { sendDigest, sendOTDAlert, sendEOD, sendSystemAlert };

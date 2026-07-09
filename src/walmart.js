@@ -6,6 +6,11 @@ const BASE = "https://marketplace.walmartapis.com";
 let cachedToken = null;
 let tokenExpiresAt = 0;
 
+// All business dates in Eastern time - UTC conversion was shifting evening dates a day ahead
+function etDate(d) {
+  return new Date(d).toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+}
+
 function wmHeaders(token) {
   return {
     "WM_SVC.NAME": "Walmart Marketplace",
@@ -119,13 +124,13 @@ function normalizeOrder(o) {
 
   // Ship-by: order-level estimate, falling back to earliest line-level ship date
   let shipBy = o.shippingInfo?.estimatedShipDate
-    ? new Date(o.shippingInfo.estimatedShipDate).toISOString().slice(0, 10)
+    ? etDate(o.shippingInfo.estimatedShipDate)
     : null;
   if (!shipBy) {
     for (const l of lines) {
       const d = l.fulfillment?.pickUpDateTime || l.statusDate;
       if (d) {
-        const iso = new Date(d).toISOString().slice(0, 10);
+        const iso = etDate(d);
         if (!shipBy || iso < shipBy) shipBy = iso;
       }
     }
@@ -133,7 +138,7 @@ function normalizeOrder(o) {
 
   return {
     orderNumber: o.purchaseOrderId,
-    orderDate: o.orderDate ? new Date(o.orderDate).toISOString().slice(0, 10) : null,
+    orderDate: o.orderDate ? etDate(o.orderDate) : null,
     shipBy,
     status,
     items,

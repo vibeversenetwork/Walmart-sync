@@ -158,6 +158,8 @@ async function syncPickList(pickItems) {
       "Product": { title: [{ text: { content: item.name } }] },
       "SKU": textProp(item.sku),
       "Qty Needed": { number: item.qty },
+      "Qty Due Today": { number: item.qtyDueToday ?? 0 },
+      "Qty Due Tomorrow": { number: item.qtyDueTomorrow ?? 0 },
       "Open Orders": { number: item.orderCount },
       "Earliest Ship By": dateOrNull(item.earliestShipBy),
     };
@@ -176,7 +178,7 @@ async function syncPickList(pickItems) {
     const currentQty = page.properties["Qty Needed"]?.number;
     if (currentQty === 0) continue;
     await notionFetch("/pages/" + page.id, "PATCH", {
-      properties: { "Qty Needed": { number: 0 }, "Open Orders": { number: 0 } },
+      properties: { "Qty Needed": { number: 0 }, "Qty Due Today": { number: 0 }, "Qty Due Tomorrow": { number: 0 }, "Open Orders": { number: 0 } },
     });
     await new Promise((r) => setTimeout(r, 350));
   }
