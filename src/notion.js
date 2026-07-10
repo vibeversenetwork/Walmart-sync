@@ -199,4 +199,58 @@ async function queryAll(databaseId) {
   return results;
 }
 
-module.exports = { upsertOrder, upsertInventoryItem, queryAll, syncPickList, buildIndex };
+
+// Per-date pick schedule: one row per product per ship-by date. Powers "order ahead".
+async function syncPickByDate(rows) {
+  const dbId = process.env.NOTION_PICKBYDATE_DB;
+  if (!dbId) return;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const keyOf = (t, d) => t + "|" + (d || "");
+
+  const existing = await queryAll(dbId);
+  const byKey = new Map();
+  for (const page of existing) {
+    const t = page.properties["Product"]?.title?.map((x) => x.plain_text).join("") || "";
+    const d = page.properties["Date"]?.date?.start || "";
+    byKey.set(keyOf(t, d), page);
+  }
+
+  const needed = new Set();
+  for (const r of rows) {
+    const k = keyOf(r.name, r.date);
+    needed.add(k);
+    const page = byKey.get(k);
+    if (page) {
+      const sameQty = (page.properties["Qty"]?.number ?? null) === r.qty;
+      const sameOrders = (page.properties["Open Orders"]?.number ?? null) === r.orderCount;
+      if (sameQty && sameOrders) continue;
+      await notionFetch("/pages/" + page.id, "PATCH", {
+        properties: { "Qty": { number: r.qty }, "Open Orders": { number: r.orderCount } },
+      });
+    } else {
+      await notionFetch("/pages", "POST", {
+        parent: { database_id: dbId },
+        properties: {
+          "Product": { title: [{ text: { content: r.name } }] },
+          "SKU": textProp(r.sku),
+          "Date": dateOrNull(r.date),
+          "Qty": { number: r.qty },
+          "Open Orders": { number: r.orderCount },
+        },
+      });
+    }
+    await sleep(350);
+  }
+
+  // Orders shipped -> their date rows zero out and vanish from the views
+  for (const [k, page] of byKey) {
+    if (needed.has(k)) continue;
+    if ((page.properties["Qty"]?.number ?? 0) === 0) continue;
+    await notionFetch("/pages/" + page.id, "PATCH", {
+      properties: { "Qty": { number: 0 }, "Open Orders": { number: 0 } },
+    });
+    await sleep(350);
+  }
+}
+
+module.exports = { upsertOrder, upsertInventoryItem, queryAll, syncPickList, buildIndex, syncPickByDate };

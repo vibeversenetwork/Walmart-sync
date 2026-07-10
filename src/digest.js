@@ -296,8 +296,7 @@ async function sendEOD() {
     pickTomorrow.length === 0
       ? "<p style='color:#888'>Nothing queued for tomorrow yet.</p>"
       : "<ul>" +
-        pickTomorrow.slice(0, 8).map((p) => "<li><b>" + p.qtyTomorrow + "\u00d7</b> " + p.product + "</li>").join("") +
-        (pickTomorrow.length > 8 ? "<li>\u2026and " + (pickTomorrow.length - 8) + " more products</li>" : "") +
+        pickTomorrow.map((p) => "<li><b>" + p.qtyTomorrow + "\u00d7</b> " + p.product + "</li>").join("") +
         "</ul>";
 
   const html =
