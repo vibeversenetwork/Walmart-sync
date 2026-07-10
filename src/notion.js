@@ -9,10 +9,12 @@ function headers() {
   };
 }
 
-async function notionFetch(path, method, body) {
+async function notionFetch(path, method, body, version) {
+  const h = headers();
+  if (version) h["Notion-Version"] = version;
   const res = await fetch(NOTION_BASE + path, {
     method,
-    headers: headers(),
+    headers: h,
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
@@ -201,13 +203,31 @@ async function queryAll(databaseId) {
 
 
 // Per-date pick schedule: one row per product per ship-by date. Powers "order ahead".
+// Uses Notion's newer data-sources API (2025-09-03): this database was created after the
+// workspace migrated to the data-source architecture, so the classic endpoint 404s on it.
+const DS_VERSION = "2025-09-03";
+
+async function dsQueryAll(dataSourceId) {
+  const results = [];
+  let cursor = undefined;
+  do {
+    const data = await notionFetch("/data_sources/" + dataSourceId + "/query", "POST", {
+      start_cursor: cursor,
+      page_size: 100,
+    }, DS_VERSION);
+    results.push(...data.results);
+    cursor = data.has_more ? data.next_cursor : undefined;
+  } while (cursor);
+  return results;
+}
+
 async function syncPickByDate(rows) {
-  const dbId = process.env.NOTION_PICKBYDATE_DB;
+  const dbId = process.env.NOTION_PICKBYDATE_DB; // data source ID for this database
   if (!dbId) return;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const keyOf = (t, d) => t + "|" + (d || "");
 
-  const existing = await queryAll(dbId);
+  const existing = await dsQueryAll(dbId);
   const byKey = new Map();
   for (const page of existing) {
     const t = page.properties["Product"]?.title?.map((x) => x.plain_text).join("") || "";
@@ -229,7 +249,7 @@ async function syncPickByDate(rows) {
       });
     } else {
       await notionFetch("/pages", "POST", {
-        parent: { database_id: dbId },
+        parent: { type: "data_source_id", data_source_id: dbId },
         properties: {
           "Product": { title: [{ text: { content: r.name } }] },
           "SKU": textProp(r.sku),
@@ -237,7 +257,7 @@ async function syncPickByDate(rows) {
           "Qty": { number: r.qty },
           "Open Orders": { number: r.orderCount },
         },
-      });
+      }, DS_VERSION);
     }
     await sleep(350);
   }
