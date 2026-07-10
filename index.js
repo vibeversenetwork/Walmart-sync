@@ -9,7 +9,7 @@
 
 const cron = require("node-cron");
 const { fetchOrders, fetchInventory } = require("./src/walmart");
-const { upsertOrder, upsertInventoryItem, syncPickList, buildIndex } = require("./src/notion");
+const { upsertOrder, upsertInventoryItem, syncPickList, buildIndex, syncPickByDate } = require("./src/notion");
 const { sendDigest, sendOTDAlert, sendEOD, sendSystemAlert } = require("./src/digest");
 
 let consecutiveFailures = 0;
@@ -17,6 +17,24 @@ let consecutiveFailures = 0;
 // Aggregate open (unshipped) order lines into per-product totals with per-date breakdowns
 function etDate(offsetDays = 0) {
   return new Date(Date.now() + offsetDays * 86400000).toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+}
+
+function buildPickByDate(orders) {
+  const today = etDate(0);
+  const map = new Map();
+  for (const o of orders) {
+    if (o.status !== "Created" && o.status !== "Acknowledged") continue;
+    // overdue and undated orders roll into today
+    const date = (!o.shipBy || o.shipBy < today) ? today : o.shipBy;
+    for (const line of o.lineDetails || []) {
+      const k = line.name + "|" + date;
+      const e = map.get(k) || { name: line.name, sku: line.sku, date, qty: 0, orderCount: 0 };
+      e.qty += line.qty;
+      e.orderCount += 1;
+      map.set(k, e);
+    }
+  }
+  return Array.from(map.values());
 }
 
 function buildPickList(orders) {
@@ -56,6 +74,7 @@ async function runSync() {
   }
   syncRunning = true;
   console.log("[sync] Starting at " + new Date().toISOString());
+  let phaseFailed = false;
   try {
     // ---- Orders ----
     const orders = await fetchOrders(14);
@@ -79,7 +98,16 @@ async function runSync() {
     await syncPickList(pickList);
     console.log("[sync] Pick list: " + pickList.length + " products needed");
 
-    // ---- Inventory ----
+    const pickByDate = buildPickByDate(orders);
+    await syncPickByDate(pickByDate);
+    console.log("[sync] Pick-by-date: " + pickByDate.length + " product-date rows");
+
+  } catch (e) {
+    phaseFailed = true;
+    console.error("[sync] Orders/pick-list phase FAILED: " + e.message);
+  }
+  try {
+    // ---- Inventory (independent phase: an orders hiccup can never skip the inventory refresh) ----
     const inventory = await fetchInventory();
     console.log("[sync] Walmart returned " + inventory.length + " items, loading Notion index...");
     const invIndex = await buildIndex(process.env.NOTION_INVENTORY_DB, "SKU");
@@ -93,21 +121,24 @@ async function runSync() {
       if (result !== "skipped") await sleep(350);
     }
     console.log("[sync] Inventory: " + invCreated + " created, " + invUpdated + " updated, " + invSkipped + " unchanged");
-    console.log("[sync] Complete at " + new Date().toISOString());
-    consecutiveFailures = 0;
   } catch (e) {
-    console.error("[sync] FAILED: " + e.message);
+    phaseFailed = true;
+    console.error("[sync] Inventory phase FAILED: " + e.message);
+  }
+  console.log("[sync] Complete at " + new Date().toISOString());
+  if (!phaseFailed) {
+    consecutiveFailures = 0;
+  } else {
     consecutiveFailures++;
     if (consecutiveFailures === 2) {
-      // Two failures in a row = ~1 hour of no data. Tell Brittany instead of failing silently.
+      // Two failed cycles in a row = ~1 hour of degraded data. Tell Brittany instead of failing silently.
       sendSystemAlert(
-        "The Walmart \u2192 Notion sync has failed " + consecutiveFailures + " times in a row. Last error: <code>" +
-        String(e.message).slice(0, 300) + "</code>"
+        "The Walmart to Notion sync has had failures in " + consecutiveFailures +
+        " consecutive cycles. Check Railway Deploy Logs for [sync] FAILED lines."
       ).catch((err) => console.error("[alert] Could not send system alert: " + err.message));
     }
-  } finally {
-    syncRunning = false;
   }
+  syncRunning = false;
 }
 
 function sleep(ms) {
