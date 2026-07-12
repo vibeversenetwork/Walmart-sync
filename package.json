@@ -1,17 +1,15 @@
 {
   "name": "savventii-walmart-sync",
-  "version": "1.0.0",
-  "description": "Syncs Walmart Marketplace orders and inventory to Notion, sends daily Brevo digest",
+  "version": "7.0.0",
+  "description": "Walmart Marketplace -> Notion sync with daily digest, OTD tripwire, and EOD close-out",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "sync": "node index.js --once",
-    "digest": "node index.js --digest"
+    "digest": "node index.js --digest",
+    "otd": "node index.js --otd",
+    "eod": "node index.js --eod"
   },
-  "engines": {
-    "node": ">=18"
-  },
-  "dependencies": {
-    "node-cron": "^3.0.3"
-  }
+  "engines": { "node": ">=18" },
+  "dependencies": { "node-cron": "^3.0.3" }
 }

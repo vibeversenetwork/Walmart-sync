@@ -1,45 +1,30 @@
-# Sa'Venttii Walmart Sync
+# Sa'Venttii Walmart Sync - v7
 
-Auto-syncs Walmart Marketplace orders + inventory to Notion every 30 minutes and emails a daily digest at 7 AM ET via Brevo.
+Full rewrite. Boot log prints `Sa'Venttii Walmart Sync v7.0 (2026-07-12)` - if you
+don't see "v7" in Railway's deploy logs, the running build is stale.
 
-## What it does
+## What runs
+- Every 30 min: orders, tracking, inventory, Daily Pick List, Pick Schedule -> Notion
+- 7:00 AM ET: daily digest email (encouragement, due-today pick list, late flags, restock)
+- 3:00 PM ET: OTD tripwire (emails ONLY if unshipped orders are due today)
+- 8:00 PM ET: EOD close-out (shipping status, FULL tomorrow pull list, checklist)
+- System alert email after 2 consecutive failed sync cycles
 
-- **Every 30 min:** pulls last 14 days of orders (status, ship-by, tracking #, carrier, totals) and all items with live inventory counts -> upserts into your two Notion databases
-- **Daily 7 AM ET:** emails a digest — late shipments, orders needing shipment, new orders, shipped yesterday, restock alerts
-- **Stock Status** is computed automatically: 0 = Out of Stock, at/below Reorder Point = Low Stock. Edit Reorder Point per SKU in Notion — the script preserves your value.
+## v7 architecture notes
+- Universal Notion resolver: every database works on either Notion architecture
+  (classic or data-sources) with either ID form. Resolution is logged at boot:
+  `[notion] Orders: classic database (a794e521...)`
+- 3 isolated sync phases: Orders / Pick lists / Inventory. One failing never blocks the others.
+- All dates in America/New_York.
+- Skip-unchanged upserts: repeat syncs finish in seconds.
 
-## Setup (one time)
+## Deploying changes
+Commit to GitHub main -> Railway builds the new commit automatically.
+NEVER use Railway's "Redeploy" button on an old deployment - it rebuilds that
+deployment's OLD commit, not your latest code.
 
-### 1. Notion integration
-1. Go to notion.so/my-integrations -> New integration -> name it "Walmart Sync" -> copy the token
-2. Open **📦 Walmart Orders** in Notion -> ••• menu -> Connections -> add "Walmart Sync"
-3. Repeat for **📊 Walmart Inventory**
-
-### 2. Walmart API keys
-Seller Center -> Developer Portal -> API Keys -> copy Client ID + Secret.
-If you still get `UNAUTHORIZED.GMP_GATEWAY_API`, regenerate production keys and confirm app status is Active. If it persists, open a Partner Support case — it's account-side activation.
-
-### 3. Deploy to Railway
-```powershell
-cd walmart-sync
-git init
-git add .
-git commit -m "initial"
-# create repo on github.com/vibeversenetwork, then:
-git remote add origin https://github.com/vibeversenetwork/walmart-sync.git
-git push -u origin main
-```
-In Railway: New Project -> Deploy from GitHub repo -> add all variables from `.env.example` in the Variables tab. Start command is `npm start` (auto-detected).
-
-### 4. Test before letting cron take over
-```powershell
-# local test (create .env from .env.example first)
-npm install
-node index.js --once     # runs one sync, check Notion fills up
-node index.js --digest   # sends the digest email now
-```
-
-## Notes
-- Notion writes are throttled to ~3/sec (their rate limit) — a sync with many SKUs takes a couple minutes. Normal.
-- Orders window is 14 days; older delivered orders stop updating but stay in Notion as history.
-- If you change any Railway variable, redeploy — env changes don't hot-reload.
+## Test commands (set temporarily as Railway start command, then revert to `npm start`)
+- `node index.js --once`   one sync
+- `node index.js --digest` send morning digest now
+- `node index.js --otd`    send OTD check now
+- `node index.js --eod`    send EOD close-out now
