@@ -207,31 +207,73 @@ async function queryAll(databaseId) {
 // workspace migrated to the data-source architecture, so the classic endpoint 404s on it.
 const DS_VERSION = "2025-09-03";
 
-async function dsQueryAll(dataSourceId) {
+// Self-healing resolver: accepts EITHER a database ID or a data source ID in
+// NOTION_PICKBYDATE_DB, and works on both old and new Notion architectures.
+// Tries: (1) id as data source (new API) -> (2) id as database, discover its
+// data source (new API) -> (3) id as classic database (old API).
+let pbdMode = null;
+async function resolvePickByDate(id) {
+  if (pbdMode) return pbdMode;
+  try {
+    await notionFetch("/data_sources/" + id + "/query", "POST", { page_size: 1 }, DS_VERSION);
+    pbdMode = { dsId: id };
+    console.log("[sync] Pick-by-date resolved: data source ID via new API");
+    return pbdMode;
+  } catch (e) { /* try next */ }
+  try {
+    const db = await notionFetch("/databases/" + id, "GET", null, DS_VERSION);
+    const ds = db && db.data_sources && db.data_sources[0] && db.data_sources[0].id;
+    if (ds) {
+      await notionFetch("/data_sources/" + ds + "/query", "POST", { page_size: 1 }, DS_VERSION);
+      pbdMode = { dsId: ds };
+      console.log("[sync] Pick-by-date resolved: database ID -> data source " + ds);
+      return pbdMode;
+    }
+  } catch (e) { /* try next */ }
+  await notionFetch("/databases/" + id + "/query", "POST", { page_size: 1 });
+  pbdMode = { classicId: id };
+  console.log("[sync] Pick-by-date resolved: classic database ID via old API");
+  return pbdMode;
+}
+
+async function pbdQueryAll(mode) {
   const results = [];
   let cursor = undefined;
   do {
-    const data = await notionFetch("/data_sources/" + dataSourceId + "/query", "POST", {
-      start_cursor: cursor,
-      page_size: 100,
-    }, DS_VERSION);
+    const data = mode.dsId
+      ? await notionFetch("/data_sources/" + mode.dsId + "/query", "POST", { start_cursor: cursor, page_size: 100 }, DS_VERSION)
+      : await notionFetch("/databases/" + mode.classicId + "/query", "POST", { start_cursor: cursor, page_size: 100 });
     results.push(...data.results);
     cursor = data.has_more ? data.next_cursor : undefined;
   } while (cursor);
   return results;
 }
 
+async function pbdCreate(mode, properties) {
+  if (mode.dsId) {
+    return notionFetch("/pages", "POST", {
+      parent: { type: "data_source_id", data_source_id: mode.dsId },
+      properties,
+    }, DS_VERSION);
+  }
+  return notionFetch("/pages", "POST", {
+    parent: { database_id: mode.classicId },
+    properties,
+  });
+}
+
 async function syncPickByDate(rows) {
-  const dbId = process.env.NOTION_PICKBYDATE_DB; // data source ID for this database
-  if (!dbId) return;
+  const rawId = process.env.NOTION_PICKBYDATE_DB;
+  if (!rawId) return;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const keyOf = (t, d) => t + "|" + (d || "");
 
-  const existing = await dsQueryAll(dbId);
+  const mode = await resolvePickByDate(rawId);
+  const existing = await pbdQueryAll(mode);
   const byKey = new Map();
   for (const page of existing) {
-    const t = page.properties["Product"]?.title?.map((x) => x.plain_text).join("") || "";
-    const d = page.properties["Date"]?.date?.start || "";
+    const t = (page.properties["Product"] && page.properties["Product"].title || []).map((x) => x.plain_text).join("");
+    const d = (page.properties["Date"] && page.properties["Date"].date && page.properties["Date"].date.start) || "";
     byKey.set(keyOf(t, d), page);
   }
 
@@ -241,23 +283,20 @@ async function syncPickByDate(rows) {
     needed.add(k);
     const page = byKey.get(k);
     if (page) {
-      const sameQty = (page.properties["Qty"]?.number ?? null) === r.qty;
-      const sameOrders = (page.properties["Open Orders"]?.number ?? null) === r.orderCount;
+      const sameQty = ((page.properties["Qty"] && page.properties["Qty"].number) ?? null) === r.qty;
+      const sameOrders = ((page.properties["Open Orders"] && page.properties["Open Orders"].number) ?? null) === r.orderCount;
       if (sameQty && sameOrders) continue;
       await notionFetch("/pages/" + page.id, "PATCH", {
         properties: { "Qty": { number: r.qty }, "Open Orders": { number: r.orderCount } },
       });
     } else {
-      await notionFetch("/pages", "POST", {
-        parent: { type: "data_source_id", data_source_id: dbId },
-        properties: {
-          "Product": { title: [{ text: { content: r.name } }] },
-          "SKU": textProp(r.sku),
-          "Date": dateOrNull(r.date),
-          "Qty": { number: r.qty },
-          "Open Orders": { number: r.orderCount },
-        },
-      }, DS_VERSION);
+      await pbdCreate(mode, {
+        "Product": { title: [{ text: { content: r.name } }] },
+        "SKU": textProp(r.sku),
+        "Date": dateOrNull(r.date),
+        "Qty": { number: r.qty },
+        "Open Orders": { number: r.orderCount },
+      });
     }
     await sleep(350);
   }
@@ -265,7 +304,7 @@ async function syncPickByDate(rows) {
   // Orders shipped -> their date rows zero out and vanish from the views
   for (const [k, page] of byKey) {
     if (needed.has(k)) continue;
-    if ((page.properties["Qty"]?.number ?? 0) === 0) continue;
+    if (((page.properties["Qty"] && page.properties["Qty"].number) ?? 0) === 0) continue;
     await notionFetch("/pages/" + page.id, "PATCH", {
       properties: { "Qty": { number: 0 }, "Open Orders": { number: 0 } },
     });
