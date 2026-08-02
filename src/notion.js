@@ -1,14 +1,15 @@
 // ============================================================
-// Notion client (v7)
-// Universal resolver: every database works whether it's on Notion's
-// classic architecture or the new data-source architecture, and
-// whether the env var holds a database ID or a data source ID.
+// Notion client (v7.1)
+// v7.1 fix: pick-list rows are matched by SKU (stable) instead of
+// product name (which Notion trims on save, causing duplicate rows).
+// Also self-heals: extra duplicate rows are zeroed out automatically.
 // ============================================================
 const NOTION_BASE = "https://api.notion.com/v1";
 const CLASSIC_VERSION = "2022-06-28";
 const DS_VERSION = "2025-09-03";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const clean = (s) => String(s == null ? "" : s).replace(/\s+/g, " ").trim();
 
 async function notionFetch(path, method, body, version) {
   const res = await fetch(NOTION_BASE + path, {
@@ -27,17 +28,13 @@ async function notionFetch(path, method, body, version) {
   return res.json();
 }
 
-// ---- Resolver -------------------------------------------------
-// Probes each database ONCE per boot and caches how to talk to it:
-//   { mode: "classic", id }  -> POST /databases/{id}/query  (2022-06-28)
-//   { mode: "ds", id }       -> POST /data_sources/{id}/query (2025-09-03)
+// ---- Resolver: works on classic OR data-source architecture -----
 const handles = new Map();
 
 async function resolveDb(label, rawId) {
   if (!rawId) throw new Error(label + ": env var is empty");
   if (handles.has(rawId)) return handles.get(rawId);
 
-  // Attempt 1: classic database query (works for pre-migration databases)
   try {
     await notionFetch("/databases/" + rawId + "/query", "POST", { page_size: 1 });
     const h = { mode: "classic", id: rawId };
@@ -46,7 +43,6 @@ async function resolveDb(label, rawId) {
     return h;
   } catch (e) { /* next */ }
 
-  // Attempt 2: the ID is a data source ID (new architecture)
   try {
     await notionFetch("/data_sources/" + rawId + "/query", "POST", { page_size: 1 }, DS_VERSION);
     const h = { mode: "ds", id: rawId };
@@ -55,7 +51,6 @@ async function resolveDb(label, rawId) {
     return h;
   } catch (e) { /* next */ }
 
-  // Attempt 3: the ID is a database ID on the new architecture -> discover its data source
   const db = await notionFetch("/databases/" + rawId, "GET", null, DS_VERSION);
   const ds = db && db.data_sources && db.data_sources[0] && db.data_sources[0].id;
   if (!ds) throw new Error(label + ": could not resolve " + rawId + " on any Notion API path");
@@ -86,10 +81,7 @@ async function createPage(handle, properties) {
       properties,
     }, DS_VERSION);
   }
-  return notionFetch("/pages", "POST", {
-    parent: { database_id: handle.id },
-    properties,
-  });
+  return notionFetch("/pages", "POST", { parent: { database_id: handle.id }, properties });
 }
 
 async function patchPage(pageId, properties) {
@@ -106,11 +98,10 @@ function pageNumber(page, prop) { return page.properties[prop]?.number ?? null; 
 function pageSelect(page, prop) { return page.properties[prop]?.select?.name || ""; }
 function pageDate(page, prop) { return page.properties[prop]?.date?.start || null; }
 
-// Load ALL rows once, indexed by title. One query per 100 rows instead of one per record.
 async function buildIndex(handle, titleProp) {
   const pages = await queryAll(handle);
   const map = new Map();
-  for (const p of pages) map.set(pageTitle(p, titleProp), p);
+  for (const p of pages) map.set(clean(pageTitle(p, titleProp)), p);
   return map;
 }
 
@@ -118,7 +109,6 @@ async function buildIndex(handle, titleProp) {
 async function upsertOrder(handle, o, index) {
   const existing = index.get(o.orderNumber);
 
-  // Skip if nothing meaningful changed - saves API calls + throttle sleep
   if (existing) {
     const same =
       pageSelect(existing, "Status") === (o.status || "") &&
@@ -149,7 +139,6 @@ async function upsertOrder(handle, o, index) {
 async function upsertInventoryItem(handle, item, reorderPointDefault, index) {
   const existing = index.get(item.sku);
 
-  // Preserve a manually-set Reorder Point
   let reorderPoint = reorderPointDefault;
   if (existing) {
     const rp = pageNumber(existing, "Reorder Point");
@@ -185,14 +174,23 @@ async function upsertInventoryItem(handle, item, reorderPointDefault, index) {
   return "created";
 }
 
-// ---- Daily Pick List (per-product totals with per-date splits) --
+// ---- Daily Pick List -------------------------------------------
+// Keyed by SKU. Duplicate rows for the same SKU are zeroed out.
 async function syncPickList(handle, pickItems) {
-  const existingByKey = await buildIndex(handle, "Product");
-  const neededKeys = new Set();
+  const pages = await queryAll(handle);
+  const bySku = new Map();
+  const duplicates = [];
+  for (const p of pages) {
+    const sku = clean(pageText(p, "SKU")) || clean(pageTitle(p, "Product"));
+    if (bySku.has(sku)) duplicates.push(p);
+    else bySku.set(sku, p);
+  }
 
+  const neededSkus = new Set();
   for (const item of pickItems) {
-    neededKeys.add(item.name);
-    const existing = existingByKey.get(item.name);
+    const key = clean(item.sku) || clean(item.name);
+    neededSkus.add(key);
+    const existing = bySku.get(key);
     if (existing) {
       const same =
         pageNumber(existing, "Qty Needed") === item.qty &&
@@ -215,30 +213,43 @@ async function syncPickList(handle, pickItems) {
     await sleep(350);
   }
 
-  // Shipped -> zero out so views hide the row
-  for (const [key, page] of existingByKey) {
-    if (neededKeys.has(key)) continue;
+  const zero = {
+    "Qty Needed": { number: 0 }, "Qty Due Today": { number: 0 },
+    "Qty Due Tomorrow": { number: 0 }, "Open Orders": { number: 0 },
+  };
+
+  for (const [key, page] of bySku) {
+    if (neededSkus.has(key)) continue;
     if ((pageNumber(page, "Qty Needed") ?? 0) === 0) continue;
-    await patchPage(page.id, {
-      "Qty Needed": { number: 0 }, "Qty Due Today": { number: 0 },
-      "Qty Due Tomorrow": { number: 0 }, "Open Orders": { number: 0 },
-    });
+    await patchPage(page.id, zero);
+    await sleep(350);
+  }
+
+  // Self-heal: any duplicate row for a SKU gets zeroed so views stay clean
+  if (duplicates.length) console.log("[notion] Pick List: zeroing " + duplicates.length + " duplicate row(s)");
+  for (const page of duplicates) {
+    if ((pageNumber(page, "Qty Needed") ?? 0) === 0) continue;
+    await patchPage(page.id, zero);
     await sleep(350);
   }
 }
 
-// ---- Pick Schedule (one row per product per ship-by date) -------
+// ---- Pick Schedule (one row per SKU per ship-by date) -----------
 async function syncPickByDate(handle, rows) {
-  const keyOf = (t, d) => t + "|" + (d || "");
-  const existing = await queryAll(handle);
+  const keyOf = (sku, d) => clean(sku) + "|" + (d || "");
+  const pages = await queryAll(handle);
   const byKey = new Map();
-  for (const page of existing) {
-    byKey.set(keyOf(pageTitle(page, "Product"), pageDate(page, "Date") || ""), page);
+  const duplicates = [];
+  for (const page of pages) {
+    const sku = clean(pageText(page, "SKU")) || clean(pageTitle(page, "Product"));
+    const k = keyOf(sku, pageDate(page, "Date") || "");
+    if (byKey.has(k)) duplicates.push(page);
+    else byKey.set(k, page);
   }
 
   const needed = new Set();
   for (const r of rows) {
-    const k = keyOf(r.name, r.date);
+    const k = keyOf(r.sku || r.name, r.date);
     needed.add(k);
     const page = byKey.get(k);
     if (page) {
@@ -259,10 +270,20 @@ async function syncPickByDate(handle, rows) {
     await sleep(350);
   }
 
+  const zero = { "Qty": { number: 0 }, "Open Orders": { number: 0 } };
+
   for (const [k, page] of byKey) {
     if (needed.has(k)) continue;
     if ((pageNumber(page, "Qty") ?? 0) === 0) continue;
-    await patchPage(page.id, { "Qty": { number: 0 }, "Open Orders": { number: 0 } });
+    await patchPage(page.id, zero);
+    await sleep(350);
+  }
+
+  // Self-heal duplicates (the Creamy Chicken Rice pileup can't recur)
+  if (duplicates.length) console.log("[notion] Pick Schedule: zeroing " + duplicates.length + " duplicate row(s)");
+  for (const page of duplicates) {
+    if ((pageNumber(page, "Qty") ?? 0) === 0) continue;
+    await patchPage(page.id, zero);
     await sleep(350);
   }
 }

@@ -1,5 +1,7 @@
 // ============================================================
-// Walmart Marketplace API client (v7)
+// Walmart Marketplace API client (v7.1)
+// v7.1: all product names and SKUs are trimmed at the source so
+// whitespace can never break row matching in Notion.
 // ============================================================
 const crypto = require("crypto");
 
@@ -10,6 +12,11 @@ let tokenExpiresAt = 0;
 // All business dates in Eastern time. UTC drifts evening dates a day ahead.
 function etDate(d) {
   return new Date(d).toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+}
+
+// Collapse any whitespace run to a single space and trim the ends.
+function clean(s) {
+  return String(s == null ? "" : s).replace(/\s+/g, " ").trim();
 }
 
 function wmHeaders(token) {
@@ -63,7 +70,7 @@ function normalizeOrder(o) {
   const lines = o.orderLines?.orderLine || [];
 
   const items = lines
-    .map((l) => (l.item?.productName || "Unknown") + " x" + (l.orderLineQuantity?.amount || 1))
+    .map((l) => clean(l.item?.productName || "Unknown") + " x" + (l.orderLineQuantity?.amount || 1))
     .join("; ");
   const qty = lines.reduce((s, l) => s + Number(l.orderLineQuantity?.amount || 1), 0);
   const total = lines.reduce((s, l) => {
@@ -88,7 +95,7 @@ function normalizeOrder(o) {
     for (const s of l.orderLineStatuses?.orderLineStatus || []) {
       const t = s.trackingInfo;
       if (t?.trackingNumber) {
-        trackingNumber = t.trackingNumber;
+        trackingNumber = clean(t.trackingNumber);
         carrier = t.carrierName?.carrier || t.carrierName?.otherCarrier || "";
         trackingUrl = t.trackingURL || "";
         break;
@@ -109,15 +116,15 @@ function normalizeOrder(o) {
     }
   }
 
-  // Line-level detail for pick list aggregation
+  // Line-level detail for pick list aggregation (names + SKUs cleaned)
   const lineDetails = lines.map((l) => ({
-    sku: l.item?.sku || "",
-    name: l.item?.productName || "Unknown",
+    sku: clean(l.item?.sku),
+    name: clean(l.item?.productName) || "Unknown",
     qty: Number(l.orderLineQuantity?.amount || 1),
   }));
 
   return {
-    orderNumber: o.purchaseOrderId,
+    orderNumber: clean(o.purchaseOrderId),
     orderDate: o.orderDate ? etDate(o.orderDate) : null,
     shipBy,
     status,
@@ -159,17 +166,18 @@ async function fetchInventory() {
   }
   const results = [];
   for (const item of items) {
+    const sku = clean(item.sku);
     let qty = null;
     try {
-      const inv = await wmGet("/v3/inventory?sku=" + encodeURIComponent(item.sku));
+      const inv = await wmGet("/v3/inventory?sku=" + encodeURIComponent(sku));
       qty = Number(inv?.quantity?.amount ?? 0);
     } catch (e) {
-      console.error("[walmart] Inventory fetch failed for SKU " + item.sku + ": " + e.message.slice(0, 200));
+      console.error("[walmart] Inventory fetch failed for SKU " + sku + ": " + e.message.slice(0, 200));
     }
     results.push({
-      sku: item.sku,
-      productName: item.productName || "",
-      itemId: item.wpid || item.itemId || "",
+      sku,
+      productName: clean(item.productName),
+      itemId: clean(item.wpid || item.itemId),
       price: Number(item.price?.amount ?? item.price ?? 0) || null,
       publishStatus: item.publishedStatus === "PUBLISHED" ? "Published" : "Unpublished",
       qtyAvailable: qty,
