@@ -153,6 +153,15 @@ async function fetchOrders(days = 14) {
   return orders.map(normalizeOrder);
 }
 
+// One order by its purchase order number (used to re-check open orders
+// that have aged out of the fetchOrders window).
+async function fetchOrderById(purchaseOrderId) {
+  const data = await wmGet("/v3/orders/" + encodeURIComponent(purchaseOrderId));
+  const raw = data?.order || data;
+  if (!raw || !raw.purchaseOrderId) return null;
+  return normalizeOrder(raw);
+}
+
 // All items + live inventory. Per-SKU inventory failures are logged, not fatal.
 async function fetchInventory() {
   const items = [];
@@ -186,4 +195,4 @@ async function fetchInventory() {
   return results;
 }
 
-module.exports = { fetchOrders, fetchInventory };
+module.exports = { fetchOrders, fetchOrderById, fetchInventory };

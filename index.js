@@ -1,14 +1,18 @@
 // ============================================================
-// Sa'Venttii Walmart Sync - v7 (2026-07-12) FULL REWRITE
+// Sa'Venttii Walmart Sync - v7.2 (2026-11-19)
+// v7.2: open orders that age out of the 14-day fetch window are
+// re-checked one by one, so shipped orders never stay stuck as
+// "Acknowledged" in Notion.
 // The BUILD banner below prints at boot: if you don't see "v7"
 // in the deploy logs, the running code is NOT this code.
 // ============================================================
-const BUILD = "v7.0 (2026-07-12)";
+const BUILD = "v7.2 (2026-11-19)";
+const RECHECK_MAX = Number(process.env.RECHECK_MAX || 150);
 
 const cron = require("node-cron");
-const { fetchOrders, fetchInventory } = require("./src/walmart");
+const { fetchOrders, fetchOrderById, fetchInventory } = require("./src/walmart");
 const {
-  resolveDb, buildIndex,
+  resolveDb, buildIndex, pageSelect, pageDate,
   upsertOrder, upsertInventoryItem, syncPickList, syncPickByDate,
 } = require("./src/notion");
 const { sendDigest, sendOTDAlert, sendEOD, sendSystemAlert } = require("./src/digest");
@@ -95,6 +99,35 @@ async function runSync() {
       if (done % 100 === 0) console.log("[sync] Orders progress: " + done + "/" + orders.length);
     }
     console.log("[sync] Orders: " + created + " created, " + updated + " updated, " + skipped + " unchanged");
+
+    // Re-check open Notion orders that Walmart's 14-day window no longer returns.
+    // Without this, an order that ships after it ages out stays "Acknowledged" forever.
+    const fetched = new Set(orders.map((o) => o.orderNumber));
+    const stale = [];
+    for (const [num, page] of index) {
+      const st = pageSelect(page, "Status");
+      if ((st === "Created" || st === "Acknowledged") && !fetched.has(num)) stale.push({ num, shipBy: pageDate(page, "Ship By") || "" });
+    }
+    stale.sort((a, b) => a.shipBy.localeCompare(b.shipBy)); // oldest first
+    let fixed = 0, stillOpen = 0, failedLookups = 0;
+    for (const s of stale.slice(0, RECHECK_MAX)) {
+      try {
+        const o = await fetchOrderById(s.num);
+        if (!o) { failedLookups++; continue; }
+        const result = await upsertOrder(ordersH, o, index);
+        if (result !== "skipped") await sleep(350);
+        if (o.status === "Created" || o.status === "Acknowledged") { stillOpen++; orders.push(o); }
+        else fixed++;
+      } catch (e) {
+        failedLookups++;
+        console.error("[sync] Re-check failed for order " + s.num + ": " + e.message.slice(0, 200));
+      }
+      await sleep(200);
+    }
+    if (stale.length) {
+      console.log("[sync] Re-checked " + Math.min(stale.length, RECHECK_MAX) + " of " + stale.length +
+        " older open orders: " + fixed + " updated to shipped/closed, " + stillOpen + " still open, " + failedLookups + " lookups failed");
+    }
   } catch (e) {
     phaseFailed = true;
     console.error("[sync] Orders phase FAILED: " + e.message);

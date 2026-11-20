@@ -1,6 +1,6 @@
 {
   "name": "savventii-walmart-sync",
-  "version": "7.0.0",
+  "version": "7.2.0",
   "description": "Walmart Marketplace -> Notion sync with daily digest, OTD tripwire, and EOD close-out",
   "main": "index.js",
   "scripts": {
