@@ -1,6 +1,6 @@
 {
   "name": "savventii-walmart-sync",
-  "version": "7.2.0",
+  "version": "7.3.0",
   "description": "Walmart Marketplace -> Notion sync with daily digest, OTD tripwire, and EOD close-out",
   "main": "index.js",
   "scripts": {
@@ -8,7 +8,9 @@
     "sync": "node index.js --once",
     "digest": "node index.js --digest",
     "otd": "node index.js --otd",
-    "eod": "node index.js --eod"
+    "eod": "node index.js --eod",
+    "perf": "node index.js --perf",
+    "perf-report": "node index.js --perf-report"
   },
   "engines": { "node": ">=18" },
   "dependencies": { "node-cron": "^3.0.3" }
