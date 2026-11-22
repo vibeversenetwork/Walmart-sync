@@ -1,35 +1,19 @@
 // ============================================================
-// Sa'Venttii Walmart Sync - v7.4 (2026-11-22)
-// v7.3: daily Seller Performance pull (11:30 AM ET) into the Walmart
-// Daily Check-in database, plus a weekly Monday email with Walmart's
-// order-level on-time delivery and late shipment reports.
-// v7.2: open orders that age out of the 14-day fetch window are
-// re-checked one by one, so shipped orders never stay stuck as
-// "Acknowledged" in Notion.
+// Sa'Venttii Walmart Sync - v7.2 (2026-11-22)
+// v7.2: saves Walmart's deliver-by date on every order. Set the
+// ORDER_LOOKBACK_DAYS variable in Railway (default 14) to backfill older orders.
 // The BUILD banner below prints at boot: if you don't see "v7"
 // in the deploy logs, the running code is NOT this code.
 // ============================================================
-const BUILD = "v7.4 (2026-11-22)";
-const RECHECK_MAX = Number(process.env.RECHECK_MAX || 150);
+const BUILD = "v7.2 (2026-11-22)";
 
 const cron = require("node-cron");
-const { fetchOrders, fetchOrderById, fetchInventory } = require("./src/walmart");
+const { fetchOrders, fetchInventory } = require("./src/walmart");
 const {
-  resolveDb, buildIndex, pageSelect, pageDate,
+  resolveDb, buildIndex,
   upsertOrder, upsertInventoryItem, syncPickList, syncPickByDate,
 } = require("./src/notion");
 const { sendDigest, sendOTDAlert, sendEOD, sendSystemAlert } = require("./src/digest");
-const { runPerformance, sendWeeklyReports } = require("./src/performance");
-
-async function performanceJob() {
-  try {
-    await runPerformance();
-  } catch (e) {
-    console.error("[perf] FAILED: " + e.message);
-    sendSystemAlert("Daily Walmart performance pull failed. " + e.message)
-      .catch((err) => console.error("[alert] Could not send system alert: " + err.message));
-  }
-}
 
 const REORDER_POINT_DEFAULT = Number(process.env.REORDER_POINT_DEFAULT || 5);
 let syncRunning = false;
@@ -97,7 +81,7 @@ async function runSync() {
 
   // Phase 1: Orders
   try {
-    orders = await fetchOrders(14);
+    orders = await fetchOrders(Number(process.env.ORDER_LOOKBACK_DAYS || 14));
     console.log("[sync] Walmart returned " + orders.length + " orders, loading Notion index...");
     const ordersH = await resolveDb("Orders", process.env.NOTION_ORDERS_DB);
     const index = await buildIndex(ordersH, "Order #");
@@ -113,35 +97,6 @@ async function runSync() {
       if (done % 100 === 0) console.log("[sync] Orders progress: " + done + "/" + orders.length);
     }
     console.log("[sync] Orders: " + created + " created, " + updated + " updated, " + skipped + " unchanged");
-
-    // Re-check open Notion orders that Walmart's 14-day window no longer returns.
-    // Without this, an order that ships after it ages out stays "Acknowledged" forever.
-    const fetched = new Set(orders.map((o) => o.orderNumber));
-    const stale = [];
-    for (const [num, page] of index) {
-      const st = pageSelect(page, "Status");
-      if ((st === "Created" || st === "Acknowledged") && !fetched.has(num)) stale.push({ num, shipBy: pageDate(page, "Ship By") || "" });
-    }
-    stale.sort((a, b) => a.shipBy.localeCompare(b.shipBy)); // oldest first
-    let fixed = 0, stillOpen = 0, failedLookups = 0;
-    for (const s of stale.slice(0, RECHECK_MAX)) {
-      try {
-        const o = await fetchOrderById(s.num);
-        if (!o) { failedLookups++; continue; }
-        const result = await upsertOrder(ordersH, o, index);
-        if (result !== "skipped") await sleep(350);
-        if (o.status === "Created" || o.status === "Acknowledged") { stillOpen++; orders.push(o); }
-        else fixed++;
-      } catch (e) {
-        failedLookups++;
-        console.error("[sync] Re-check failed for order " + s.num + ": " + e.message.slice(0, 200));
-      }
-      await sleep(200);
-    }
-    if (stale.length) {
-      console.log("[sync] Re-checked " + Math.min(stale.length, RECHECK_MAX) + " of " + stale.length +
-        " older open orders: " + fixed + " updated to shipped/closed, " + stillOpen + " still open, " + failedLookups + " lookups failed");
-    }
   } catch (e) {
     phaseFailed = true;
     console.error("[sync] Orders phase FAILED: " + e.message);
@@ -216,10 +171,8 @@ async function main() {
   if (args.includes("--digest")) { await sendDigest(); process.exit(0); }
   if (args.includes("--otd")) { await sendOTDAlert(); process.exit(0); }
   if (args.includes("--eod")) { await sendEOD(); process.exit(0); }
-  if (args.includes("--perf")) { await runPerformance(); process.exit(0); }
-  if (args.includes("--perf-report")) { await sendWeeklyReports(); process.exit(0); }
 
-  console.log("Schedules: sync every 30 min | digest 7:00 AM ET | performance pull 11:30 AM ET | weekly reports Mon 11:35 AM ET | OTD tripwire 3:00 PM ET | EOD close-out 8:00 PM ET");
+  console.log("Schedules: sync every 30 min | digest 7:00 AM ET | OTD tripwire 3:00 PM ET | EOD close-out 8:00 PM ET");
   console.log("Emails to: " + (process.env.DIGEST_TO_EMAIL || "(DIGEST_TO_EMAIL not set!)"));
 
   cron.schedule("*/30 * * * *", runSync);
@@ -236,17 +189,7 @@ async function main() {
     sendEOD().catch((e) => console.error("[eod] FAILED: " + e.message));
   }, { timezone: "America/New_York" });
 
-  cron.schedule("30 11 * * *", () => {
-    console.log("[cron] 11:30 AM performance pull firing");
-    performanceJob();
-  }, { timezone: "America/New_York" });
-  cron.schedule("35 11 * * 1", () => {
-    console.log("[cron] Monday weekly reports firing");
-    sendWeeklyReports().catch((e) => console.error("[perf] Weekly reports FAILED: " + e.message));
-  }, { timezone: "America/New_York" });
-
   runSync(); // immediate sync on boot
-  setTimeout(performanceJob, 20000); // and one performance pull, so a deploy shows right away if it works
 }
 
 main();
