@@ -1,5 +1,6 @@
 // ============================================================
-// Walmart Marketplace API client (v7.1)
+// Walmart Marketplace API client (v7.2)
+// v7.2: saves Walmart's customer deliver-by date (estimatedDeliveryDate).
 // v7.1: all product names and SKUs are trimmed at the source so
 // whitespace can never break row matching in Notion.
 // ============================================================
@@ -116,6 +117,9 @@ function normalizeOrder(o) {
     }
   }
 
+  // Deliver-by: the delivery date Walmart promised the customer
+  const deliverBy = o.shippingInfo?.estimatedDeliveryDate ? etDate(o.shippingInfo.estimatedDeliveryDate) : null;
+
   // Line-level detail for pick list aggregation (names + SKUs cleaned)
   const lineDetails = lines.map((l) => ({
     sku: clean(l.item?.sku),
@@ -127,6 +131,7 @@ function normalizeOrder(o) {
     orderNumber: clean(o.purchaseOrderId),
     orderDate: o.orderDate ? etDate(o.orderDate) : null,
     shipBy,
+    deliverBy,
     status,
     items,
     qty,
@@ -151,15 +156,6 @@ async function fetchOrders(days = 14) {
     path = next ? "/v3/orders" + next : null;
   }
   return orders.map(normalizeOrder);
-}
-
-// One order by its purchase order number (used to re-check open orders
-// that have aged out of the fetchOrders window).
-async function fetchOrderById(purchaseOrderId) {
-  const data = await wmGet("/v3/orders/" + encodeURIComponent(purchaseOrderId));
-  const raw = data?.order || data;
-  if (!raw || !raw.purchaseOrderId) return null;
-  return normalizeOrder(raw);
 }
 
 // All items + live inventory. Per-SKU inventory failures are logged, not fatal.
@@ -195,24 +191,4 @@ async function fetchInventory() {
   return results;
 }
 
-
-// ---- Seller Performance (Insights) API -------------------------
-// Returns { status, json } for JSON, { status, buffer, contentType } for files.
-// A 204 (no data yet) comes back as { status: 204 }.
-async function wmInsights(path, opts = {}) {
-  const token = await getToken();
-  const headers = Object.assign(wmHeaders(token), { "WM_MARKET": "US" }, opts.headers || {});
-  if (opts.file) headers["Accept"] = "application/octet-stream, application/json";
-  const res = await fetch(BASE + path, { headers });
-  if (res.status === 204) return { status: 204 };
-  if (!res.ok) {
-    const err = new Error("Walmart GET " + path + " failed (" + res.status + "): " + (await res.text()).slice(0, 300));
-    err.status = res.status;
-    throw err;
-  }
-  const ct = res.headers.get("content-type") || "";
-  if (ct.includes("json")) return { status: res.status, json: await res.json() };
-  return { status: res.status, buffer: Buffer.from(await res.arrayBuffer()), contentType: ct };
-}
-
-module.exports = { fetchOrders, fetchOrderById, fetchInventory, wmInsights };
+module.exports = { fetchOrders, fetchInventory };
