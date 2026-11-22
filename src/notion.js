@@ -1,5 +1,6 @@
 // ============================================================
-// Notion client (v7.1)
+// Notion client (v7.2)
+// v7.2: Orders get a "Deliver By" date (Walmart's promised delivery date).
 // v7.1 fix: pick-list rows are matched by SKU (stable) instead of
 // product name (which Notion trims on save, causing duplicate rows).
 // Also self-heals: extra duplicate rows are zeroed out automatically.
@@ -113,7 +114,8 @@ async function upsertOrder(handle, o, index) {
     const same =
       pageSelect(existing, "Status") === (o.status || "") &&
       pageText(existing, "Tracking #") === (o.trackingNumber || "") &&
-      pageDate(existing, "Ship By") === (o.shipBy || null);
+      pageDate(existing, "Ship By") === (o.shipBy || null) &&
+      pageDate(existing, "Deliver By") === (o.deliverBy || null);
     if (same) return "skipped";
   }
 
@@ -121,6 +123,7 @@ async function upsertOrder(handle, o, index) {
     "Order #": { title: [{ text: { content: o.orderNumber } }] },
     "Order Date": dateOrNull(o.orderDate),
     "Ship By": dateOrNull(o.shipBy),
+    "Deliver By": dateOrNull(o.deliverBy),
     "Status": selectOrNull(o.status),
     "Items": textProp(o.items),
     "Qty": { number: o.qty ?? null },
