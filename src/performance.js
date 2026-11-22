@@ -140,6 +140,7 @@ async function runPerformance() {
     if (non) parts.push("Not your fault: " + non + ".");
   }
   if (misses.length) parts.push("Missed: " + misses.join("; ") + ".");
+  if (otd && process.env.PERF_DEBUG !== "0") parts.push("Raw OTD: " + JSON.stringify(otd).slice(0, 1300));
   props["Auto pull"] = { rich_text: [{ text: { content: parts.join(" ").slice(0, 1900) } }] };
 
   if (!got && !otd) {
