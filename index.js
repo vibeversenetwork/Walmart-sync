@@ -1,5 +1,5 @@
 // ============================================================
-// Sa'Venttii Walmart Sync - v7.3 (2026-11-22)
+// Sa'Venttii Walmart Sync - v7.3.1 (2026-11-22)
 // v7.3: daily Seller Performance pull (11:30 AM ET) into the Walmart
 // Daily Check-in database, plus a weekly Monday email with Walmart's
 // order-level on-time delivery and late shipment reports.
@@ -9,7 +9,7 @@
 // The BUILD banner below prints at boot: if you don't see "v7"
 // in the deploy logs, the running code is NOT this code.
 // ============================================================
-const BUILD = "v7.3 (2026-11-22)";
+const BUILD = "v7.3.1 (2026-11-22)";
 const RECHECK_MAX = Number(process.env.RECHECK_MAX || 150);
 
 const cron = require("node-cron");

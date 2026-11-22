@@ -55,6 +55,14 @@ function pickRate(payload) {
   return null;
 }
 
+function findKey(obj, re) {
+  if (!obj) return null;
+  const k = Object.keys(obj).find((x) => re.test(x) && obj[x] && typeof obj[x] === "object");
+  return k ? obj[k] : null;
+}
+const sellerDrivers = (p) => findKey(p, /^sellerAccountable.*Drivers/i) || findKey(p, /sellerAccountable.*Driver/i);
+const otherDrivers = (p) => findKey(p, /nonAccountable.*Drivers/i) || findKey(p, /NonAccountable/i);
+
 function unwrap(json) {
   if (!json) return null;
   const p = json.payload || json.data || json;
@@ -63,7 +71,12 @@ function unwrap(json) {
 
 function driverLine(obj) {
   if (!obj || typeof obj !== "object") return "";
-  const nice = (k) => k.replace(/Rate$/, "").replace(/([A-Z]+)/g, " $1").replace(/EDD/g, "EDD").trim().toLowerCase();
+  const NAMES = { lateShipmentRate: "marked shipped late", lateHandoverToCarrierRate: "carrier's first scan came late",
+    carrierEDDLaterThanEDDRate: "carrier's date later than promised", noCarrierScanRate: "no carrier scan",
+    carrierMethodMismatchRate: "wrong carrier method", shipLocationMismatchRate: "wrong ship-from location",
+    carrierDelaysRate: "carrier delays", weatherDelaysRate: "weather", carrierExceptionRate: "carrier exceptions",
+    miscellaneousRate: "other (Walmart doesn't say)" };
+  const nice = (k) => NAMES[k] || k.replace(/Rate$/, "").replace(/([A-Z]+)/g, " $1").trim().toLowerCase();
   return Object.entries(obj)
     .map(([k, v]) => [k, num(v)])
     .filter(([, v]) => v != null && v > 0)
@@ -129,18 +142,19 @@ async function runPerformance() {
   const props = {};
   for (const [k, v] of Object.entries(values)) props[k] = { number: v };
   if (otd) {
-    const mine = num(otd.sellerAccountableRate);
-    if (mine != null) {
-      props["OTD your fault"] = { number: mine };
-      parts.push("On-time delivery " + values["On-time delivery"] + "% overall, " + mine + "% counting only what Walmart blames on you.");
-    }
-    const acc = driverLine(otd.sellerAccountableDrivers || otd.sellerAccountableVtrDrivers);
-    const non = driverLine(otd.nonAccountableDrivers || otd.nonAccountableVtrDrivers);
-    if (acc) parts.push("Counted against you: " + acc + ".");
-    if (non) parts.push("Not your fault: " + non + ".");
+    // Seller Center's on-time delivery (the one the 90% standard uses) is the
+    // seller-accountable rate. overallRate also counts late orders Walmart says aren't the seller's fault.
+    const mine = num(otd.sellerAccountableRate), all = num(otd.overallRate);
+    if (mine != null) { values["On-time delivery"] = mine; props["On-time delivery"] = { number: mine }; }
+    const acc = driverLine(sellerDrivers(otd));
+    const non = driverLine(otherDrivers(otd));
+    if (acc) props["OTD why"] = { rich_text: [{ text: { content: ("late because: " + acc).slice(0, 300) } }] };
+    parts.push("On-time delivery " + (mine ?? "?") + "% (the one Seller Center shows)" + (all != null ? ", " + all + "% if you count every late order" : "") + ".");
+    if (acc) parts.push("Counted against you (share of all orders): " + acc + ".");
+    if (non) parts.push("Not counted against you: " + non + ".");
   }
   if (misses.length) parts.push("Missed: " + misses.join("; ") + ".");
-  if (otd && process.env.PERF_DEBUG !== "0") parts.push("Raw OTD: " + JSON.stringify(otd).slice(0, 1300));
+  if (otd && process.env.PERF_DEBUG === "1") parts.push("Raw OTD: " + JSON.stringify(otd).slice(0, 1300));
   props["Auto pull"] = { rich_text: [{ text: { content: parts.join(" ").slice(0, 1900) } }] };
 
   if (!got && !otd) {
@@ -205,11 +219,10 @@ async function sendWeeklyReports() {
   try {
     const { values, otd } = await pullPerformance();
     const mine = otd ? num(otd.sellerAccountableRate) : null;
-    summary = "<p><b>On-time delivery:</b> " + (values["On-time delivery"] ?? "?") + "% overall" +
-      (mine != null ? ", <b>" + mine + "%</b> counting only what Walmart blames on you" : "") + ".<br>" +
-      "<b>Late shipment:</b> " + (values["Late shipment"] ?? "?") + "%.</p>" +
-      (otd ? "<p>Counted against you: " + (driverLine(otd.sellerAccountableDrivers) || "none listed") +
-        "<br>Not your fault: " + (driverLine(otd.nonAccountableDrivers) || "none listed") + "</p>" : "");
+    summary = "<p><b>On-time delivery:</b> " + (mine ?? values["On-time delivery"] ?? "?") + "% (standard: 90%+)<br>" +
+      "<b>Late shipment:</b> " + (values["Late shipment"] ?? "?") + "% (standard: under 5%)</p>" +
+      (otd ? "<p>Counted against you: " + (driverLine(sellerDrivers(otd)) || "none listed") +
+        "<br>Not counted against you: " + (driverLine(otherDrivers(otd)) || "none listed") + "</p>" : "");
   } catch (e) { /* summary is a bonus */ }
 
   const html = "<div style='font-family:Georgia,serif;color:#3b2a20'>" +
