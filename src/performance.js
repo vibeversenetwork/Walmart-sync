@@ -108,6 +108,56 @@ async function findTodayRow(h, today) {
   return (data.results || [])[0] || null;
 }
 
+// ---- Money: current-cycle payment statement --------------------
+// Walk any JSON and collect numeric fields by key name (first match wins).
+function collect(obj, out = {}, path = "") {
+  if (!obj || typeof obj !== "object") return out;
+  for (const [k, v] of Object.entries(obj)) {
+    const key = path ? path + "." + k : k;
+    if (v && typeof v === "object" && !Array.isArray(v) && ("amount" in v) && num(v.amount) != null) { if (!(key in out)) out[key] = num(v.amount); }
+    else if (v && typeof v === "object") collect(Array.isArray(v) ? v[0] : v, out, key);
+    else if (num(v) != null && typeof v !== "boolean" && !/date|time|id$/i.test(k)) { if (!(key in out)) out[key] = num(v); }
+    else if (typeof v === "string" && /date/i.test(k) && !(key in out)) out[key] = v;
+  }
+  return out;
+}
+function firstMatch(flat, re, exclude) {
+  const k = Object.keys(flat).find((x) => re.test(x.split(".").pop()) && (!exclude || !exclude.test(x)) && typeof flat[x] === "number");
+  return k ? flat[k] : null;
+}
+
+async function pullStatement() {
+  const r = await wmInsights("/v3/report/payment/statement");
+  if (r.status === 204 || !r.json) return null;
+  const flat = collect(r.json);
+  const balance = firstMatch(flat, /^(closingBalance|accountBalance|currentBalance|totalBalance|balance)$/i);
+  const holds = firstMatch(flat, /^(holds?|holdAmount|totalHolds?|paymentHolds?)$/i);
+  const reserves = firstMatch(flat, /^(reserves?|reserveAmount|totalReserves?)$/i);
+  const payKey = Object.keys(flat).find((x) => /payout.*date|payment.*date|disbursement.*date/i.test(x.split(".").pop()));
+  return { balance, holds, reserves, payoutDate: payKey ? String(flat[payKey]).slice(0, 10) : null, raw: r.json };
+}
+
+const MONEY_DB = process.env.NOTION_MONEY_DB || "41d3c2cc-0439-813a-8bca-000b1bfd50c0";
+const money$ = (n) => "$" + Number(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+async function updateNextPayout(payable, balance, onHold, payoutDate) {
+  const h = await resolveDb("Money", MONEY_DB);
+  const filter = { and: [{ property: "Type", select: { equals: "Payout in" } }, { property: "Paid", checkbox: { equals: false } }] };
+  const sorts = [{ property: "Due", direction: "ascending" }];
+  const data = h.mode === "ds"
+    ? await notion("/data_sources/" + h.id + "/query", "POST", { filter, sorts, page_size: 1 }, DS_VERSION)
+    : await notion("/databases/" + h.id + "/query", "POST", { filter, sorts, page_size: 1 });
+  const row = (data.results || [])[0];
+  if (!row) return "no unpaid payout row";
+  const props = {
+    Amount: { number: payable },
+    Note: { rich_text: [{ text: { content: "Walmart balance " + money$(balance) + " as of " + etStamp() + (onHold ? ". " + money$(onHold) + " on hold or in reserve, so " + money$(payable) + " is payable" : ". Nothing on hold") + ". Pulled automatically. Tick Paid when it lands." } }] },
+  };
+  if (payoutDate && /^\d{4}-\d{2}-\d{2}$/.test(payoutDate)) props.Due = { date: { start: payoutDate } };
+  await notion("/pages/" + row.id, "PATCH", { properties: props });
+  return "updated";
+}
+
 // ---- Daily pull -------------------------------------------------
 async function pullPerformance() {
   const values = {}, misses = [];
@@ -155,6 +205,27 @@ async function runPerformance() {
   }
   if (misses.length) parts.push("Missed: " + misses.join("; ") + ".");
   if (otd && process.env.PERF_DEBUG === "1") parts.push("Raw OTD: " + JSON.stringify(otd).slice(0, 1300));
+
+  // Money (never blocks the performance numbers)
+  let moneyNote = "";
+  try {
+    const st = await pullStatement();
+    if (st && st.balance != null) {
+      const onHold = Math.round(((st.holds || 0) + (st.reserves || 0)) * 100) / 100;
+      const payable = Math.round((st.balance - onHold) * 100) / 100;
+      props["Balance"] = { number: st.balance };
+      props["On hold"] = { number: onHold };
+      parts.push("Balance " + money$(st.balance) + ", on hold " + money$(onHold) + (st.payoutDate ? ", payout " + st.payoutDate : "") + ".");
+      try { moneyNote = await updateNextPayout(payable, st.balance, onHold, st.payoutDate); }
+      catch (e) { moneyNote = "payout row not updated (" + e.message.slice(0, 120) + ")"; console.error("[perf] payout row: " + e.message); }
+      if (moneyNote && moneyNote !== "updated") parts.push("Money: " + moneyNote + ".");
+    } else {
+      parts.push("Money: couldn't find the balance. Raw statement: " + JSON.stringify(st ? st.raw : null).slice(0, 1200));
+    }
+  } catch (e) {
+    parts.push("Money: statement pull failed (" + (e.status || "error") + ").");
+    console.error("[perf] statement FAILED: " + e.message);
+  }
   props["Auto pull"] = { rich_text: [{ text: { content: parts.join(" ").slice(0, 1900) } }] };
 
   if (!got && !otd) {
